@@ -21,7 +21,9 @@ import java.io.UncheckedIOException;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
+import java.util.function.Consumer;
 
+import jakarta.servlet.ServletException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.SerializationFeature;
@@ -33,6 +35,7 @@ import org.springframework.web.testfixture.servlet.MockHttpServletRequest;
 import org.springframework.web.testfixture.servlet.MockHttpServletResponse;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 /**
  * Tests for {@link ServerResponse.SseBuilder}.
@@ -210,6 +213,83 @@ class SseServerResponseTests {
 
 		String expected = "event:custom\n\n";
 		assertThat(this.mockResponse.getContentAsString()).isEqualTo(expected);
+	}
+
+	@Test
+	void sendStringWithCarriageReturn() throws Exception {
+		String body = "line1\rline2\r\nline3";
+		ServerResponse response = ServerResponse.sse(sse -> {
+			try {
+				sse.send(body);
+			}
+			catch (IOException ex) {
+				throw new UncheckedIOException(ex);
+			}
+		});
+
+		ServerResponse.Context context = Collections::emptyList;
+
+		ModelAndView mav = response.writeTo(this.mockRequest, this.mockResponse, context);
+		assertThat(mav).isNull();
+
+		String expected = "data:line1\ndata:line2\ndata:line3\n\n";
+		assertThat(this.mockResponse.getContentAsString()).isEqualTo(expected);
+	}
+
+	@Test
+	void commentWithCarriageReturn() throws Exception {
+		ServerResponse response = ServerResponse.sse(sse -> {
+			try {
+				sse.comment("line1\rline2").send();
+			}
+			catch (IOException ex) {
+				throw new UncheckedIOException(ex);
+			}
+		});
+
+		ServerResponse.Context context = Collections::emptyList;
+
+		ModelAndView mav = response.writeTo(this.mockRequest, this.mockResponse, context);
+		assertThat(mav).isNull();
+
+		String expected = ":line1\n:line2\n\n";
+		assertThat(this.mockResponse.getContentAsString()).isEqualTo(expected);
+	}
+
+	@Test
+	void idWithLineSeparatorIsRejected() throws Exception {
+		assertLineSeparatorRejected(sse -> sse.id("1\nevent:injected"));
+		assertLineSeparatorRejected(sse -> sse.id("1\revent:injected"));
+		assertLineSeparatorRejected(sse -> sse.id("1\r\nevent:injected"));
+	}
+
+	@Test
+	void eventWithLineSeparatorIsRejected() throws Exception {
+		assertLineSeparatorRejected(sse -> sse.event("custom\ndata:injected"));
+		assertLineSeparatorRejected(sse -> sse.event("custom\rdata:injected"));
+		assertLineSeparatorRejected(sse -> sse.event("custom\r\ndata:injected"));
+	}
+
+	private void assertLineSeparatorRejected(Consumer<ServerResponse.SseBuilder> sseConsumer) throws Exception {
+		ServerResponse response = ServerResponse.sse(sse -> {
+			sseConsumer.accept(sse);
+			try {
+				sse.send();
+			}
+			catch (IOException ex) {
+				throw new UncheckedIOException(ex);
+			}
+		});
+
+		MockHttpServletRequest request = new MockHttpServletRequest("GET", "https://example.com");
+		request.setAsyncSupported(true);
+		MockHttpServletResponse servletResponse = new MockHttpServletResponse();
+		ServerResponse.Context context = Collections::emptyList;
+
+		assertThatExceptionOfType(ServletException.class)
+				.isThrownBy(() -> response.writeTo(request, servletResponse, context))
+				.withCauseInstanceOf(IllegalArgumentException.class);
+		assertThat(servletResponse.getContentAsString()).doesNotContain("injected");
 	}
 
 	@Test // gh-34608
